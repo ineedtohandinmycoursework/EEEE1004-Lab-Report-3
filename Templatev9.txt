@@ -1,0 +1,639 @@
+/////////////////////////////
+//* IDM - Build & Layout  *//
+//* Nottingham University *//
+//*    Week 6&7 Build     *//
+/////////////////////////////
+
+// Include files for required libraries
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "opencv_aee.hpp"
+#include "main.hpp"     // You can use this file for declaring defined values and functions
+#include "pi2c.h"
+
+//for the yes
+#include <vector>
+#include <numeric>
+//for the no
+#include <opencv2/imgproc.hpp>
+
+//#define SHOW_colourdetec
+
+//#define SHOW_images
+//#define function_testing
+//#define loop_testing
+#define SHOW_imgpi
+
+#define black_thres 400 //this value is the limit of black pixels that have to be seen before swapping back to black
+#define colour_thres 5 //max number of coloured pixels before swapping to black
+#define line_delay_value 20 //number of times the colour has been active before looking to maybe go back to black
+#define line_volume 1000 // the maximum number of pixels in a line that the car can see
+
+#define slit_height 96 //0-240 i think 0 top of screen
+#define k_V_Value 15 //57 is good for actual black
+
+using namespace std; // same thing as below but for std::
+using namespace cv; //means don't have to do cv::imshow
+
+//Function defines
+Mat crop_image(Mat image);
+Mat split_image(Mat cropped_image,int segment_position);
+int colour_detection(Mat image,char colour);
+float PID_control(int colour_values[40],Mat split_image);
+char symbol_detection(Mat image,char colour);
+int k_line_following(Mat frame);
+Mat contrast_image(Mat image);
+
+//Variable defines
+char colour_line = 'k';
+int new_line_delay = 0;
+
+void setup(void)
+{
+    setupCamera(320, 240);  // Enable the camera for OpenCV
+}
+
+int main( int argc, char** argv )
+{
+    setup();    // Call a setup function to prepare IO and devices
+    #ifdef SHOW_imgpi
+    cv::namedWindow("Photo");   // Create a GUI window called photo
+    #endif
+    Mat frame;
+    while(1)    // Main loop to perform image processing
+    {
+
+
+        //while(frame.empty())
+            frame = captureFrame(); // Capture a frame from the camera and store in a new matrix variable
+            #ifdef SHOW_imgpi
+            cv::imshow("Original", frame); //Display the image in the window
+            #endif
+            
+            /*Contrast Applied to frame*/
+            Mat contr_frame = contrast_image(frame);
+
+            //*Calling the symbol detection function*//
+            colour_line = symbol_detection(frame,colour_line); //checks to see if there is a symbol in the image
+
+            //*Editing the image*//
+            Mat cropped_image = crop_image(frame);//have cropped_image be returned
+            int colour_values[40];
+
+            //*K line following*//
+            //int center_point = k_line_following(frame);
+
+            //*Colour Detection on Edited image*//
+
+            Mat split;
+            for(int loop = 0;loop < 40; loop++)
+            {
+                split = split_image(cropped_image,loop);
+                //char colour = 'k';
+                int pixels = colour_detection(split,colour_line); //returns the number of coloured pixels in the segment
+
+                colour_values[loop] = pixels;
+                //printf("Colour Values = %d\n",colour_values[loop]);
+                #ifdef loop_testing
+                printf("Loop = %d\n",loop);
+                printf("Pixels = %d\n",pixels);
+                #endif
+            }
+            #ifdef SHOW_colourdetec
+            printf("ColourValuesArray:\n");
+            for(int j = 0;j < 40; j++)
+            {
+                printf("-%d",colour_values[j]);
+            }
+            #endif
+
+
+
+        //*New line*//
+        //if the line is on a colour everytime the loop in run the counter increases if the line is k (black) the counter is set to 0
+        if (colour_line != 'k')
+        {
+           new_line_delay ++;
+           //printf("new_line_delay = %d",new_line_delay);
+        }
+        else
+        {
+            new_line_delay = 0;
+        }
+
+
+
+        //*PID Calculations *//
+        float error = PID_control(colour_values,cropped_image);
+        int send_int = (error*10)+10;
+        printf("send_int = %d\n",send_int);
+        //Displaying the error array
+        printf("ColourValuesArray:\n");
+        for(int j = 0;j < 40; j++)
+        {
+            printf("-%d",colour_values[j]); //prints out the PID array so it can be seen
+        }
+            Pi2c arduino(0x07); //Create a new object "arduino" using address "0x07"
+            #ifdef SHOW_colourdetec
+            printf("printing to esp32\n");
+            #endif // SHOW_colourdetec
+//            printf("Send int = %d",center_point);
+            arduino.i2cWriteArduinoInt(send_int); //sends the value to the esp32
+            #ifdef SHOW_colourdetec
+            printf("send_int = %d\n",send_int); //shows the value that is being sent to the esp32
+            #endif
+        #ifdef SHOW_imgpi
+        cv::imshow("Photo", frame); //Display the image in the window
+        #endif
+        int key = cv::waitKey(100);   // Wait 1ms for a keypress (required to update windows)
+
+        key = (key==255) ? -1 : key;    // Check if the ESC key has been pressed
+        if (key == 27)
+
+            break;
+	}
+
+	closeCV();  // Disable the camera and close any windows
+
+	return 0;
+}
+Mat crop_image(Mat image)
+{
+    //int rownumber = 150;
+    Mat cropped_image;
+    cropped_image = image(Rect(0,slit_height,320,8));//(X,Y is the left most pixel of cropped inmage ,Witdth,height size of cropped)
+
+    //Vec3b* p = cropped_image.ptr<Vec3b>(rownumber);// doesnt fo anything rn
+    #ifdef SHOW_imgpi
+    cv::imshow("cropped", cropped_image);
+    #endif
+    return cropped_image;
+}
+Mat split_image(Mat cropped_image,int segment_position)
+{
+    //printf("Entered Split Image Function\n");
+    int segment = (segment_position*8);
+    #ifdef loop_testing
+    printf("Segment = %d\n",segment);
+    printf("Seg_pos = %d\n",segment_position);
+    #endif
+    Mat block = cropped_image(Rect(segment,0,8,8));
+    #ifdef SHOW_images
+    show_image(block);
+    #endif
+    return block;
+}
+
+int colour_detection(Mat image,char colour)
+{
+    Mat image_HSV,image_green,image_red1,image_red2,image_red,image_blue,image_yellow,image_black; //creating image arrays
+    int pixels,red_pixels,green_pixels,blue_pixels,yellow_pixels,black_pixels;
+    /*Creates a greyscale image of each colour rgb where wanted coloured pixels are 255*/
+        cvtColor(image, image_HSV, COLOR_BGR2HSV); //Converts to HSV
+    if(colour == 'r')
+    {
+        //Red
+        inRange(image_HSV, Scalar(0, 41, 86), Scalar(7, 255, 255), image_red1);    //(0/360,87/100,34/100) - (13/360,255,255)
+        #ifdef SHOW_images
+        show_image(image_red1);
+        #endif
+        inRange(image_HSV, Scalar(173, 155, 45), Scalar(179, 255, 255), image_red2);    //(349/360,77/100,44/100) - (179,255,255)
+        #ifdef SHOW_images
+        show_image(image_red2);
+        #endif
+        hconcat(image_red1,image_red2,image_red);
+        #ifdef SHOW_images
+        show_image(image_red);
+        #endif
+        red_pixels = countNonZero(image_red);
+        pixels = red_pixels;
+    }
+    else if(colour == 'g')
+    {
+        //checks for green scalar(0-179, 0-255, 0-255)
+        inRange(image_HSV, Scalar(35, 68, 57), Scalar(73, 255, 255), image_green);
+        #ifdef SHOW_images
+        show_image(image_green);
+        #endif
+        green_pixels = countNonZero(image_green);
+        pixels = green_pixels;
+    }
+    else if(colour == 'b')
+    {
+        //Blue
+        inRange(image_HSV, Scalar(94, 122, 94), Scalar(128, 255, 255), image_blue);
+        #ifdef SHOW_images
+        show_image(image_blue);
+        #endif
+        blue_pixels = countNonZero(image_blue);
+        pixels = blue_pixels;
+    }
+    else if(colour == 'y')
+    {
+        //Yellow
+        inRange(image_HSV, Scalar(25, 132, 140), Scalar(36, 255, 255), image_yellow);
+        #ifdef SHOW_images
+        show_image(image_yellow);
+        #endif
+        yellow_pixels = countNonZero(image_yellow);
+        pixels = yellow_pixels;
+    }
+    else if(colour == 'k')
+    {
+        //Black
+        inRange(image_HSV, Scalar(0, 0, 0), Scalar(180, 255, k_V_Value), image_black); //orginal 180 255 57
+        #ifdef SHOW_images
+        show_image(image_black);
+        #endif
+        #ifdef SHOW_imgpi
+        //cv::imshow("Black Line", image_black); //Display the image in the window
+        #endif
+        black_pixels = countNonZero(image_black);
+        pixels = black_pixels;
+    }
+        /*Displays the number of of each coloured pixel are in the image*/
+        //count the pixels that are 255 or 0 and compare to total pixel and determine if colour is there
+        //printf("R:%d,G:%d,B:%d,Y:%d,K:%d\n",red_pixels,green_pixels,blue_pixels,yellow_pixels,black_pixels);
+        return pixels;
+}
+
+float PID_control(int colour_values[40],Mat cropped_image)
+{
+
+    int weighted_array[40] = {-54,-52,-50,-36,-34,-32,-30,-22,-20,-18,-15,-9,-9,-7,-7,-5,-5,-1,-1,-1,1,1,1,5,5,7,7,9,9,15,18,20,22,30,32,34,36,50,52,54};
+    float error,error_div;
+    float sum_error = 0;
+    float array_sum = 0;
+    // sums the weighted array for use in division later done as a calc so if array values change the sum doesn't have to be recalculated
+    for (int i=20 ; i<40 ; i++)
+    {
+        array_sum += weighted_array[i];
+    }
+    array_sum = array_sum * 64;
+
+    for(int j =0 ; j<40 ; j++)
+    {
+        if((colour_values[j]) != 0)
+        {
+            sum_error += (weighted_array[j]*colour_values[j]);
+        }
+    }
+    //need some sort of delay here to stop it imeditly going back to black
+    printf("Sum_error = %f\n",sum_error);
+    if(sum_error < colour_thres && new_line_delay > line_delay_value)
+    {
+        printf("Entered return to 'k' function\t");
+        int pixels = 0;
+        Mat split;
+        for(int loop = 0;loop < 40; loop++)
+            {
+                split = split_image(cropped_image,loop);
+                //char colour = 'k';
+                pixels += colour_detection(split,'k'); //returns the number of coloured pixels in the segment
+            }
+            printf("K Pixels = %d\n",pixels);
+        if(pixels > black_thres)
+        {
+           colour_line = 'k';
+        }
+        else
+        {
+            return 500;
+        }
+    }
+    int sum_colour;
+    for(int j =0 ; j<40 ; j++)
+    {
+        if((colour_values[j]) != 0)
+        {
+            sum_colour += colour_values[j];
+        }
+    }
+    error_div = sum_error/array_sum; /*array_sum*/ //max pixels a line covers is 4000 any number greater return 500 and reverse
+    printf("Error = %f\n",error_div);
+    if (sum_colour > line_volume)
+    {
+        return 500;
+    }
+
+    else if(sum_error == 0)
+    {
+        return 500;
+    }
+
+    else{
+    return error_div;
+    }
+}
+
+char symbol_detection(Mat image,char colour)
+{
+    /*Converts the Image inputted to a B/W image for colour Purple*/
+    Mat image_HSV,image_purple;
+
+    image_purple = Mat::zeros(350,350, CV_8UC3 );
+
+    int pixels;
+    cvtColor(image, image_HSV, COLOR_BGR2HSV); //Converts to HSV
+    //inRange(image_HSV, Scalar(141, 79, 115), Scalar(159, 255, 255), image_purple);// 0-179 0-255 0-255
+    inRange(image_HSV, Scalar(145, 68, 57), Scalar(170, 255, 255), image_purple);// 0-179 0-255 0-255
+    #ifdef SHOW_images                           // ^ Change this value later
+    show_image(image_purple);
+    #endif
+    pixels = countNonZero(image_purple);
+    printf(" Symbol Pixels = %d",pixels);
+
+    /*If there are lots of purple pixels */
+    if(pixels > 1000)
+    {
+        printf("There is a Symbol\n");
+
+        /*Finding the Contours in the image*/
+        vector< vector<Point> > contours; // Variable for list of contours
+        vector<Vec4i> hierarchy; // Variable for image topology data
+        vector<Point> boundingContour;
+        Mat symbol_contours = Mat::zeros( image_purple.size(), CV_8UC3 ); //creates an Mat of the correct size to write into
+        //finds contours of the purple pixels image
+        findContours(image_purple, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE, Point(0, 0)); // Calculate the contours and store them
+
+        /*Finding the largest contour*/
+        int largest_area=0;
+        int largest_contour_index=0;
+        Rect bounding_rect;
+
+        for( size_t i = 0; i< contours.size(); i++ ) // iterate through each contour.
+        {
+            double area = contourArea( contours[i] );  //  Find the area of contour
+
+            if( area > largest_area )
+            {
+                largest_area = area;
+                largest_contour_index = i;               //Store the index of largest contour
+                bounding_rect = boundingRect( contours[i] ); // Find the bounding rectangle for biggest contour
+            }
+        }
+        Mat largest_contour = Mat::zeros( image_purple.size(), CV_8UC3 ); //creates an Mat of the correct size to write into
+
+        printf("Largest Contour %d\n",largest_contour_index);
+        drawContours( largest_contour, contours,largest_contour_index, Scalar( 0, 255, 0 ), 2 ); // Draw the largest contour using previously stored index.
+
+        #ifdef SHOW_images
+        printf("Printing Largest Contour Image??\n");
+        show_image(largest_contour);
+        #endif
+
+        vector<Point> largest_contour_point = contours[largest_contour_index];
+        Mat tranformed_image = Mat::zeros( 350,350, CV_8UC3 );
+
+        // Approximating contours and looking for a quadrilateral
+        vector<Point> approx;
+        double peri = arcLength(contours[largest_contour_index], true);
+        approxPolyDP(contours[largest_contour_index], approx, 0.02 * peri, true);
+
+        tranformed_image = transformPerspective(approx, image_purple,350,350);
+        Mat emptyMat;
+        if(tranformed_image.empty())
+        {
+            printf("Transform Returned empty\n");
+            printf("Colour = %c\n",colour);
+            return colour;
+        }
+
+        #ifdef SHOW_images
+        printf("GOODBYE Cubert!!!!!!!!!!!\n");
+        show_image(tranformed_image);
+        #endif
+
+        #ifdef function_testing
+        printf("1\n");
+        #endif
+        for(size_t i = 0; i < contours.size(); i++) // Loop through the contours
+        {
+            //drawContours( symbol_contours, contours,largest_contour_index, Scalar( 0, 255, 0 ), 2 ); // Draw the largest contour using previously stored index.
+            drawContours( symbol_contours, contours, (int)i,  Scalar(0,0,255), 2, 8, hierarchy, 0, Point() ); //Draw each in red
+        }
+        #ifdef function_testing
+        printf("2\n");
+        #endif
+        inRange(symbol_contours,Scalar(0, 0, 255), Scalar(0, 0, 255), symbol_contours);
+        #ifdef function_testing
+        printf("3\n");
+        #endif
+        //Crop out the outer square
+        Mat noborder_image;
+        Mat noborder_image = tranformed_image(Rect(26,26,296,296));//(X,Y is the left most pixel of cropped inmage ,Witdth,height size of cropped)
+        //noborder_image = tranformed_image(Rect(0,0,350,350));//(X,Y is the left most pixel of cropped inmage ,Witdth,height size of cropped
+        #ifdef function_testing
+        printf("4\n");
+        #endif
+        #ifdef SHOW_images
+        show_image(/*noborder_image*/tranformed_image);
+        #endif
+
+        //fill the centre of the image
+        floodFill(noborder_image, Point(147,147), Scalar(0,0,255));
+        #ifdef function_testing
+        printf("5\n");
+        #endif
+        #ifdef SHOW_images
+        printf("Printing Noborder with floodfill Image\n");
+        show_image(noborder_image);
+        #endif
+        #ifdef function_testing
+        printf("6\n");
+        #endif
+        /*detect what symbol it is*/
+        // create a mat for each comparison image (do this in setup not in loop later)
+        Mat image_HSV, bwStar, bwCircle, bwTriangle, bwUmbrella;
+        Mat Star = imread("Star.png");//reads in the image
+        cvtColor(Star, image_HSV, COLOR_BGR2HSV); //Converts to HSV
+        inRange(image_HSV,Scalar(141, 79, 115), Scalar(159, 255, 255), bwStar);
+        bwStar = bwStar(Rect(26,26,296,296));//(X,Y is the left most pixel of cropped inmage ,Witdth,height size of cropped)
+        transpose(bwStar, bwStar);
+        flip(bwStar, bwStar,1); //transpose+flip(1)=CW
+        transpose(bwStar, bwStar);
+        flip(bwStar, bwStar,1); //transpose+flip(1)=CW
+
+        Mat Triangle = imread("Triangle.png");//reads in the image
+        cvtColor(Triangle, image_HSV, COLOR_BGR2HSV); //Converts to HSV
+        inRange(image_HSV,Scalar(141, 79, 115), Scalar(159, 255, 255), bwTriangle);
+        bwTriangle = bwTriangle(Rect(26,26,296,296));//(X,Y is the left most pixel of cropped inmage ,Witdth,height size of cropped)
+        transpose(bwTriangle, bwTriangle);
+        flip(bwTriangle, bwTriangle,1); //transpose+flip(1)=CW
+        transpose(bwTriangle, bwTriangle);
+        flip(bwTriangle, bwTriangle,1); //transpose+flip(1)=CW
+
+        Mat Circle = imread("Circle.png");//reads in the image
+        cvtColor(Circle, image_HSV, COLOR_BGR2HSV); //Converts to HSV
+        inRange(image_HSV,Scalar(141, 79, 115), Scalar(159, 255, 255), bwCircle);
+        bwCircle = bwCircle(Rect(26,26,296,296));//(X,Y is the left most pixel of cropped inmage ,Witdth,height size of cropped)
+        transpose(bwCircle, bwCircle);
+        flip(bwCircle, bwCircle,1); //transpose+flip(1)=CW
+        transpose(bwCircle, bwCircle);
+        flip(bwCircle, bwCircle,1); //transpose+flip(1)=CW
+
+        Mat Umbrella = imread("Umbrella.png");//reads in the image
+        cvtColor(Umbrella, image_HSV, COLOR_BGR2HSV); //Converts to HSV
+        inRange(image_HSV,Scalar(141, 79, 115), Scalar(159, 255, 255), bwUmbrella);
+        bwUmbrella = bwUmbrella(Rect(26,26,296,296));//(X,Y is the left most pixel of cropped inmage ,Witdth,height size of cropped)
+        transpose(bwUmbrella, bwUmbrella);
+        flip(bwUmbrella, bwUmbrella,1); //transpose+flip(1)=CW
+        transpose(bwUmbrella, bwUmbrella);
+        flip(bwUmbrella, bwUmbrella,1); //transpose+flip(1)=CW
+        #ifdef function_testing
+        printf("7\n");
+        #endif
+        float matchs = compareImages(noborder_image, bwStar);
+        float matcht = compareImages(noborder_image, bwTriangle);
+        float matchc = compareImages(noborder_image, bwCircle);
+        float matchu = compareImages(noborder_image, bwUmbrella);
+        printf("Star match = %f\n",matchs);
+        printf("Triangle match = %f\n",matcht);
+        printf("Circle match = %f\n",matchc);
+        printf("Umbrella match = %f\n",matchu);
+        #ifdef function_testing
+        printf("8\n");
+        #endif
+        //return the new colour to look for
+        if (matchs > 80)
+        {
+            printf("Star!!\n");
+            return 'g';
+        }
+        else if (matcht > 80)
+        {
+            printf("Triangle!!\n");
+            return 'b';
+        }
+        else if (matchc > 80)
+        {
+            printf("Circle!!\n");
+            return 'r';
+        }
+        else if (matchu > 80)
+        {
+            printf("Umbrella!!\n");
+            return 'y';
+        }
+        else
+        {
+           printf("Couldn't workout the shape\n");
+           printf("Colour = %c\n",colour);
+           return colour;
+        }
+    //add in a protection so that if it can identify it as two shapes the check again / look for higher percentage
+    }
+    else
+    {
+        //nothing colour stays the same
+        printf("There is no Symbol\n");
+        printf("Colour = %c\n",colour);
+        return colour;
+    }
+
+                                                                        /*IDM - Code build*/
+}
+
+int k_line_following(Mat frame)//using contours
+{
+    //#include <opencv2/imgproc.hpp> -- Might need this library
+    Mat Frame_HSV;
+    Point regionCentre;
+    cvtColor(frame, Frame_HSV, COLOR_BGR2HSV); //Converts to HSV
+    Mat blackMask;
+        //Making the image black and white
+        inRange(Frame_HSV, Scalar(0, 0, 0), Scalar(180, 255, 57), Frame_HSV);
+        Frame_HSV = Frame_HSV(Rect(0,0,320,180));//
+        //dilate(blackMask, blackMask, Mat(), Point(-1, -1), 10);
+
+        //Creating Variables
+        std::vector< std::vector<cv::Point> > contours; // Variable for list of
+        std::vector<Vec4i> hierarchy; // Variable for image topology data
+        cv::findContours(Frame_HSV, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE, Point(0,0));
+        //Finding Max area of the black contours found
+        if (contours.size() > 0)
+        {
+            //cvtColor(, frame, COLOR_HSV2BGR);
+            //std::vector<std::vector<cv::Point>>approxContours(contours.size());
+            int maxArea = 0;
+            int maxArea_index = -1;
+            for(int i = 0; i < contours.size(); i++)  // Loop through the contours
+            {
+
+                int area = cv::contourArea(contours[i]);
+                if ( area > maxArea)
+                {
+                    maxArea = area;
+                    maxArea_index = i;
+                }
+            }
+            std::vector< std::vector<cv::Point> > approxedcontours(contours.size());
+            //Making a a polygon out of largest contour and finding the centre of it
+            for(int i = 0; i < contours.size(); i++)
+            {
+                cv::approxPolyDP(contours[i],approxedcontours[i], 10, true);
+                regionCentre = findContourCentre(contours[i]);
+                //Approximate the contour
+            }
+            if (maxArea_index != -1)
+            {
+                drawContours( frame, approxedcontours, maxArea_index, Scalar(0,0,255), 2, LINE_8, noArray(), 0,Point());
+
+            imshow("redcontour", Frame_HSV);
+
+            int center_point = regionCentre.x;
+             printf("centre point = %d\n",center_point);
+
+            return center_point;
+            }
+            else
+            {
+                return 500;
+            }
+            /*Unused PID??*/
+
+            //regionCentre = findContourCentre(contours[i]); // Calculate the centre point
+            //printf("Contour centre: x = %dpx, y = %dpx\n", regionCentre.x,regionCentre.y);
+            //circle(frame, regionCentre, 5, Scalar(255, 255, 255), FILLED);
+
+                //float error;
+                /*float kp = 1;
+                float ki = 0.5;
+                float kd = 0.5;
+                int centreOffset = 0;
+                int screenCentre = 320;
+
+                error = (screenCentre - regionCentre.x + centreOffset);
+                int errorSum = errorSum + error;
+                int previousError = error;
+                int u = (kp * error) + (ki * errorSum) + (kd * (error - previous error));*/
+
+        }
+        else
+        {
+            return 500;
+        }
+}
+
+Mat contrast_image(Mat image)
+{
+    //#define SHOW_contr_image
+        Mat contr_HSV;
+        cvtColor(image, contr_HSV, COLOR_BGR2HSV); //Converts to HSV
+
+        std::vector<Mat> channels; // Array for channels
+        cv::split(contr_HSV, channels); // Split the HSV into separate channels
+        cv::equalizeHist(channels[2], channels[2]); // Equalise the Value channel
+        cv::merge(channels, contr_HSV); // Merge back into a single image
+    #ifdef SHOW_contr_image
+        show_image(contr_HSV);
+    #endif
+        Mat frameEQ;
+        cvtColor(contr_HSV, frameEQ,COLOR_HSV2BGR); // Convert back to BGR
+    #ifdef SHOW_contr_image
+        show_image(frameEQ);
+    #endif
+    return frameEQ;
+}
+
